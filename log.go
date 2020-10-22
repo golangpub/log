@@ -18,35 +18,26 @@ func init() {
 	dir := os.Getenv("LOG_DIR")
 	if dir == "" {
 		defaultLogger = NewLogger(os.Stderr)
-		return
-	}
-
-	fw, err := NewFileWriter(dir)
-	if err != nil {
-		log.Printf("Create file writer: %v\n", err)
-		defaultLogger = NewLogger(os.Stderr)
-		return
-	}
-
-	if s := os.Getenv("LOG_ROTATE_KEEP"); s != "" {
-		n, err := strconv.ParseInt(s, 10, 32)
-		if err != nil {
-			log.Printf("Parse LOG_ROTATE_KEEP: %v\n", err)
-		} else {
-			fw.SetRotateKeep(int(n))
+	} else {
+		fw := NewFileWriter(dir)
+		if s := os.Getenv("LOG_ROTATE_KEEP"); s != "" {
+			n, err := strconv.ParseInt(s, 10, 32)
+			if err != nil {
+				log.Printf("Parse LOG_ROTATE_KEEP: %v", err)
+			} else {
+				fw.SetRotateKeep(int(n))
+			}
 		}
-	}
-
-	if s := os.Getenv("LOG_ROTATE_SIZE"); s != "" {
-		n, err := strconv.ParseInt(s, 10, 32)
-		if err != nil {
-			log.Printf("Parse LOG_ROTATE_SIZE: %v\n", err)
-		} else {
-			fw.SetRotateSize(int(n) << 20)
+		if s := os.Getenv("LOG_ROTATE_SIZE"); s != "" {
+			n, err := strconv.ParseInt(s, 10, 32)
+			if err != nil {
+				log.Printf("Parse LOG_ROTATE_SIZE: %v", err)
+			} else {
+				fw.SetRotateSize(int(n) << 20)
+			}
 		}
+		defaultLogger = NewLogger(fw)
 	}
-
-	defaultLogger = NewLogger(fw)
 }
 
 func Default() *Logger {

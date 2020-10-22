@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"log"
 	"os"
-	"os/exec"
 	"path"
 	"regexp"
 	"sort"
@@ -20,7 +19,7 @@ const (
 	rotateDateFormat  = "20060102"
 	minRotateSize     = 1 << 20  // 1M
 	defaultRotateSize = 64 << 20 // 64M
-	defaultRotateKeep = 30       // 30 days
+	defaultRotateKeep = 64
 )
 
 var rotateNameRegex = regexp.MustCompile("[0-9]{8}\\.[0-9]+\\." + rotateSuffix)
@@ -40,14 +39,13 @@ type FileWriter struct {
 	rotateKeep int
 }
 
-func NewFileWriter(dir string) (*FileWriter, error) {
+func NewFileWriter(dir string) *FileWriter {
 	err := os.MkdirAll(dir, 0755)
 	if err != nil {
-		return nil, fmt.Errorf("make dir: %w", err)
+		log.Fatalf("Make dir: %s, %v", dir, err)
 	}
-
 	if d, err := os.Open(dir); err != nil {
-		return nil, fmt.Errorf("open dir: %w", err)
+		log.Fatalf("Open dir: %s, %v", dir, err)
 	} else {
 		dir = d.Name()
 	}
@@ -57,11 +55,11 @@ func NewFileWriter(dir string) (*FileWriter, error) {
 		rotateSize: defaultRotateSize,
 		rotateKeep: defaultRotateKeep,
 	}
-
-	if err = fw.rotate(); err != nil {
-		return nil, fmt.Errorf("rotate: %w", err)
+	fw.rotate()
+	if fw.file == nil {
+		log.Fatalf("Cannot write logs under dir %s", dir)
 	}
-	return fw, nil
+	return fw
 }
 
 func (w *FileWriter) RotateSize() int {
@@ -81,55 +79,60 @@ func (w *FileWriter) RotateKeep() int {
 }
 
 func (w *FileWriter) SetRotateKeep(keep int) {
-	if keep < 0 {
-		keep = 0
+	if keep <= 0 {
+		keep = 1
 	}
 	w.rotateKeep = keep
-	names, err := w.listRotateFileNames()
+	names, err := w.getSortedNames()
 	if err != nil {
-		log.Printf("List rotate filenames: %v\n", err)
+		log.Printf("GetSortedNames: %v", err)
 		return
 	}
-	go w.keepFilesByDate(names, keep)
+	go w.keepFiles(names, keep)
 }
 
 func (w *FileWriter) Write(p []byte) (int, error) {
 	if w.file == nil {
 		return 0, errors.New("no open file")
 	}
-	if err := w.rotate(); err != nil {
-		return 0, fmt.Errorf("rotate: %w", err)
-	}
+	w.rotate()
 	n, err := w.file.Write(p)
 	if err != nil {
-		return n, fmt.Errorf("write: %w", err)
+		return 0, fmt.Errorf("write: %w", err)
 	}
 	w.size += n
 	return n, nil
 }
 
-func (w *FileWriter) rotate() error {
+func (w *FileWriter) rotate() {
 	day := time.Now().Day()
 	if w.size <= w.rotateSize && w.date != nil && day == w.date.Day() {
-		return nil
+		return
 	}
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	if w.size <= w.rotateSize && w.date != nil && day == w.date.Day() {
-		return nil
+		return
 	}
 
-	names, err := w.listRotateFileNames()
+	names, err := w.getSortedNames()
 	if err != nil {
-		return fmt.Errorf("list rotate file names: %w", err)
+		log.Printf("GetSortedNames: %v\n", err)
+		return
 	}
 	date := time.Now()
 	dateStr := date.Format(rotateDateFormat)
-	num := w.nextFileNumber(dateStr, names)
-	filePath := path.Join(w.dir, fmt.Sprintf("%s.%d.%s", dateStr, num, rotateSuffix))
-	newFile, err := os.OpenFile(filePath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0644)
+	num, err := w.parseNextNum(dateStr, names)
 	if err != nil {
-		return fmt.Errorf("open file %s: %w", filePath, err)
+		log.Printf("ParseNextNum: %v\n", err)
+		return
+	}
+
+	name := fmt.Sprintf("%s.%d.%s", dateStr, num, rotateSuffix)
+	fullPath := path.Join(w.dir, name)
+	newFile, err := os.OpenFile(fullPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0644)
+	if err != nil {
+		log.Printf("OpenFile %s: %v", fullPath, err)
 	}
 	old := w.file
 	w.size = 0
@@ -141,15 +144,7 @@ func (w *FileWriter) rotate() error {
 			log.Printf("Close file: %v\n", err)
 		}
 	}
-	latestFile := path.Join(w.dir, "latest.log")
-	go func() {
-		w.keepFilesByDate(names, w.rotateKeep)
-		err := exec.Command("ln", "-sf", filePath, latestFile).Run()
-		if err != nil {
-			log.Printf("Link: %v", err)
-		}
-	}()
-	return nil
+	go w.keepFiles(names, w.rotateKeep-1)
 }
 
 func (w *FileWriter) Close() error {
@@ -159,7 +154,7 @@ func (w *FileWriter) Close() error {
 	return err
 }
 
-func (w *FileWriter) listRotateFileNames() (rotateNameList, error) {
+func (w *FileWriter) getSortedNames() (rotateNameList, error) {
 	d, err := os.Open(w.dir)
 	if err != nil {
 		return nil, fmt.Errorf("open dir %s: %w", w.dir, err)
@@ -179,50 +174,33 @@ func (w *FileWriter) listRotateFileNames() (rotateNameList, error) {
 	return names, nil
 }
 
-func (w *FileWriter) nextFileNumber(date string, sortedNames []string) int {
+func (w *FileWriter) parseNextNum(date string, sortedNames []string) (int, error) {
 	if len(sortedNames) == 0 {
-		return 1
+		return 1, nil
 	}
 
-	for _, name := range sortedNames {
-		if !strings.HasPrefix(name, date) {
-			return 1
-		}
-		s := name[len(date)+1 : len(name)-len(rotateSuffix)-1]
-		n, err := strconv.ParseInt(s, 10, 32)
-		if err != nil {
-			log.Printf("Parse number %s: %v\n", s, err)
-		}
-		return int(n + 1)
+	latest := sortedNames[0]
+	if !strings.HasPrefix(sortedNames[0], date) {
+		return 1, nil
 	}
-	return 1
+	numPart := latest[len(date)+1 : len(latest)-len(rotateSuffix)-1]
+	n, err := strconv.ParseInt(numPart, 10, 32)
+	if err != nil {
+		return 0, fmt.Errorf("parseInt %s: %w", numPart, err)
+	}
+	return int(n + 1), nil
 }
 
-func (w *FileWriter) keepFilesByDate(names []string, days int) {
-	dateStr := time.Now().AddDate(0, 0, -days).Format(rotateDateFormat)
-	for _, name := range names {
-		if strings.Compare(dateStr, name) < 0 {
-			continue
-		}
-		w.deleteFile(name)
-	}
-}
-
-// Deprecated: use keepFilesByDate strategy
-func (w *FileWriter) keepFilesByNum(sortedNames []string, num int) {
-	if len(sortedNames) <= num {
+func (w *FileWriter) keepFiles(sortedNames []string, size int) {
+	if len(sortedNames) <= size {
 		return
 	}
-	for _, name := range sortedNames[num:] {
-		w.deleteFile(name)
-	}
-}
-
-func (w *FileWriter) deleteFile(name string) {
-	fullPath := path.Join(w.dir, name)
-	err := os.Remove(fullPath)
-	if err != nil {
-		log.Printf("Remove %s: %v\n", fullPath, err)
+	for _, name := range sortedNames[size:] {
+		fullPath := path.Join(w.dir, name)
+		err := os.Remove(fullPath)
+		if err != nil {
+			log.Printf("Remove %s: %v\n", fullPath, err)
+		}
 	}
 }
 

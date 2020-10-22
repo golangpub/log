@@ -67,12 +67,8 @@ func (l *Logger) SetFlags(flags int) {
 	l.flags = flags
 }
 
-func (l *Logger) AddOutput(w io.Writer) {
-	l.render.AddOutput(w)
-}
-
-func (l *Logger) RemoveOutput(w io.Writer) {
-	l.render.RemoveOutput(w)
+func (l *Logger) SetOutput(w io.Writer) {
+	l.render.SetWriter(w)
 }
 
 func (l *Logger) Log(level Level, callDepth int, args []interface{}) {
@@ -85,7 +81,11 @@ func (l *Logger) Log(level Level, callDepth int, args []interface{}) {
 	msg = msg[0 : len(msg)-1]
 	err := l.render.Render(newEntry(l.Flags(), level, l.name, l.fields, msg, callDepth+1))
 	if err != nil {
-		log.Printf("Render: %v\n", err)
+		log.Fatalf("Render: %v", err)
+	}
+
+	if level == FatalLevel {
+		os.Exit(1)
 	}
 }
 
@@ -96,7 +96,11 @@ func (l *Logger) Logf(level Level, callDepth int, format string, args []interfac
 	msg := fmt.Sprintf(format, args...)
 	err := l.render.Render(newEntry(l.Flags(), level, l.name, l.fields, msg, callDepth+1))
 	if err != nil {
-		log.Printf("Render: %v\n", err)
+		log.Fatalf("Render: %v", err)
+	}
+
+	if level == FatalLevel {
+		os.Exit(1)
 	}
 }
 
